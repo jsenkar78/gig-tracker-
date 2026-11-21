@@ -2,12 +2,14 @@ import streamlit as st
 import pandas as pd
 from datetime import date, datetime
 from calendar import monthrange
-from supabase import create_client
+from supabase import create_client, ClientOptions
 import io
 
+# Connect to Supabase (forces standard public schema for new API keys)
 sb = create_client(
     st.secrets["SUPABASE_URL"],
     st.secrets["SUPABASE_KEY"],
+    options=ClientOptions(schema="public", auto_refresh_token=False, persist_session=False)
 )
 
 MILEAGE_RATE = 0.72
