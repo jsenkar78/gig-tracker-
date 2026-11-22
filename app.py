@@ -221,20 +221,30 @@ with tab_view:
                     "mileage_ded": "Mileage Shield", "taxable_profit": "Schedule C Profit", "notes": "Notes"
                 })
                 
-                # THIS IS THE FIX: Calculate the Total Row's Schedule C based on Income - Mileage - Write-offs, not just the sum of the column
+                # ADD WEEKLY WRITE-OFFS COLUMN (only for the total row)
+                wk_table["Write-offs"] = 0.0
+
+                # BUILD TOTAL ROW (Now includes Write-offs so the math works visually)
                 total_row_wk = pd.DataFrame([{
                     "Date": "TOTAL", "Type": "", "Platform": "", 
                     "Income": wk_table['Income'].sum(), "Hours": wk_table['Hours'].sum(), 
                     "Miles": wk_table['Miles'].sum(), "Rate": "", 
                     "Mileage Shield": wk_table['Mileage Shield'].sum(), 
+                    "Write-offs": wk_rec,
                     "Schedule C Profit": wk_taxable, # Use the calculated wk_taxable to match the top!
                     "Notes": ""
                 }])
+                
+                # Reorder columns to put Write-offs before Schedule C
+                cols = ["Date", "Type", "Platform", "Income", "Hours", "Miles", "Rate", "Mileage Shield", "Write-offs", "Schedule C Profit", "Notes"]
+                wk_table = wk_table[cols]
+                total_row_wk = total_row_wk[cols]
+                
                 wk_table_display = pd.concat([wk_table, total_row_wk], ignore_index=True)
                 
                 st.dataframe(wk_table_display.style.format({
                     "Income": "${:,.2f}", "Miles": "{:,.1f}", "Hours": "{:,.1f}",
-                    "Mileage Shield": "${:,.2f}", "Schedule C Profit": "${:,.2f}"
+                    "Mileage Shield": "${:,.2f}", "Write-offs": "${:,.2f}", "Schedule C Profit": "${:,.2f}"
                 }), use_container_width=True, hide_index=True)
 
         st.divider()
@@ -246,20 +256,28 @@ with tab_view:
             "mileage_ded": "Mileage Shield", "taxable_profit": "Schedule C Profit", "notes": "Notes"
         }).sort_values(["Date", "ID"], ascending=[False, False])
 
+        display_df["Write-offs"] = 0.0
+
         # BUILD TABLE WITH TOTALS ROW FOR MONTHLY VIEW
         total_row_main = pd.DataFrame([{
             "ID": "", "Date": "TOTAL", "Type": "", "Platform": "", 
             "Income": display_df['Income'].sum(), "Hours": display_df['Hours'].sum(), 
             "Miles": display_df['Miles'].sum(), "Rate": "", 
             "Mileage Shield": display_df['Mileage Shield'].sum(), 
+            "Write-offs": month_rec,
             "Schedule C Profit": month_taxable, # Use the calculated month_taxable to match the top!
             "Notes": ""
         }])
         
+        cols = ["ID", "Date", "Type", "Platform", "Income", "Hours", "Miles", "Rate", "Mileage Shield", "Write-offs", "Schedule C Profit", "Notes"]
+        display_df = display_df[cols]
+        total_row_main = total_row_main[cols]
+
         display_df_with_total = pd.concat([display_df, total_row_main], ignore_index=True)
+        
         st.dataframe(display_df_with_total.style.format({
             "Income": "${:,.2f}", "Miles": "{:,.1f}", "Hours": "{:,.1f}",
-            "Mileage Shield": "${:,.2f}", "Schedule C Profit": "${:,.2f}"
+            "Mileage Shield": "${:,.2f}", "Write-offs": "${:,.2f}", "Schedule C Profit": "${:,.2f}"
         }), use_container_width=True, hide_index=True)
 
         with st.expander("✏️ Edit or delete an entry from this month"):
