@@ -222,15 +222,18 @@ with tab_view:
                 })
                 
                 total_row_wk = pd.DataFrame([{
-                    "Date": "**TOTAL**", "Type": "", "Platform": "", 
-                    "Income": f"**${wk_table['Income'].sum():,.2f}**", "Hours": f"**{wk_table['Hours'].sum():,.1f}**", 
-                    "Miles": f"**{wk_table['Miles'].sum():,.1f}**", "Rate": "", 
-                    "Mileage Shield": f"**${wk_table['Mileage Shield'].sum():,.2f}**", 
-                    "Schedule C Profit": f"**${wk_table['Schedule C Profit'].sum():,.2f}**", "Notes": ""
+                    "Date": "TOTAL", "Type": "", "Platform": "", 
+                    "Income": wk_table['Income'].sum(), "Hours": wk_table['Hours'].sum(), 
+                    "Miles": wk_table['Miles'].sum(), "Rate": "", 
+                    "Mileage Shield": wk_table['Mileage Shield'].sum(), 
+                    "Schedule C Profit": wk_table['Schedule C Profit'].sum(), "Notes": ""
                 }])
                 wk_table_display = pd.concat([wk_table, total_row_wk], ignore_index=True)
                 
-                st.dataframe(wk_table_display, use_container_width=True, hide_index=True)
+                st.dataframe(wk_table_display.style.format({
+                    "Income": "${:,.2f}", "Miles": "{:,.1f}", "Hours": "{:,.1f}",
+                    "Mileage Shield": "${:,.2f}", "Schedule C Profit": "${:,.2f}"
+                }), use_container_width=True, hide_index=True)
 
         st.divider()
 
@@ -243,15 +246,18 @@ with tab_view:
 
         # BUILD TABLE WITH TOTALS ROW FOR MONTHLY VIEW
         total_row_main = pd.DataFrame([{
-            "ID": "", "Date": "**TOTAL**", "Type": "", "Platform": "", 
-            "Income": f"**${display_df['Income'].sum():,.2f}**", "Hours": f"**{display_df['Hours'].sum():,.1f}**", 
-            "Miles": f"**{display_df['Miles'].sum():,.1f}**", "Rate": "", 
-            "Mileage Shield": f"**${display_df['Mileage Shield'].sum():,.2f}**", 
-            "Schedule C Profit": f"**${display_df['Schedule C Profit'].sum():,.2f}**", "Notes": ""
+            "ID": "", "Date": "TOTAL", "Type": "", "Platform": "", 
+            "Income": display_df['Income'].sum(), "Hours": display_df['Hours'].sum(), 
+            "Miles": display_df['Miles'].sum(), "Rate": "", 
+            "Mileage Shield": display_df['Mileage Shield'].sum(), 
+            "Schedule C Profit": display_df['Schedule C Profit'].sum(), "Notes": ""
         }])
         
         display_df_with_total = pd.concat([display_df, total_row_main], ignore_index=True)
-        st.dataframe(display_df_with_total, use_container_width=True, hide_index=True)
+        st.dataframe(display_df_with_total.style.format({
+            "Income": "${:,.2f}", "Miles": "{:,.1f}", "Hours": "{:,.1f}",
+            "Mileage Shield": "${:,.2f}", "Schedule C Profit": "${:,.2f}"
+        }), use_container_width=True, hide_index=True)
 
         with st.expander("✏️ Edit or delete an entry from this month"):
             entry_ids = display_df["ID"].tolist()
