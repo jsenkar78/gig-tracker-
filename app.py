@@ -221,12 +221,14 @@ with tab_view:
                     "mileage_ded": "Mileage Shield", "taxable_profit": "Schedule C Profit", "notes": "Notes"
                 })
                 
+                # THIS IS THE FIX: Calculate the Total Row's Schedule C based on Income - Mileage - Write-offs, not just the sum of the column
                 total_row_wk = pd.DataFrame([{
                     "Date": "TOTAL", "Type": "", "Platform": "", 
                     "Income": wk_table['Income'].sum(), "Hours": wk_table['Hours'].sum(), 
                     "Miles": wk_table['Miles'].sum(), "Rate": "", 
                     "Mileage Shield": wk_table['Mileage Shield'].sum(), 
-                    "Schedule C Profit": wk_table['Schedule C Profit'].sum(), "Notes": ""
+                    "Schedule C Profit": wk_taxable, # Use the calculated wk_taxable to match the top!
+                    "Notes": ""
                 }])
                 wk_table_display = pd.concat([wk_table, total_row_wk], ignore_index=True)
                 
@@ -250,7 +252,8 @@ with tab_view:
             "Income": display_df['Income'].sum(), "Hours": display_df['Hours'].sum(), 
             "Miles": display_df['Miles'].sum(), "Rate": "", 
             "Mileage Shield": display_df['Mileage Shield'].sum(), 
-            "Schedule C Profit": display_df['Schedule C Profit'].sum(), "Notes": ""
+            "Schedule C Profit": month_taxable, # Use the calculated month_taxable to match the top!
+            "Notes": ""
         }])
         
         display_df_with_total = pd.concat([display_df, total_row_main], ignore_index=True)
