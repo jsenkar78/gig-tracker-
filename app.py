@@ -41,8 +41,6 @@ def load_entries() -> pd.DataFrame:
     if "entry_type" not in df.columns:
         df["entry_type"] = "Business"
     df["entry_type"] = df["entry_type"].fillna("Business")
-    
-    # Fallback for old entries that don't have hours yet
     if "hours_worked" not in df.columns:
         df["hours_worked"] = 0.0
     df["hours_worked"] = df["hours_worked"].fillna(0.0)
@@ -52,10 +50,7 @@ def load_entries() -> pd.DataFrame:
     
     df["mileage_ded"] = df.apply(lambda row: row["miles"] * row["rate"] if row["entry_type"] == "Business" else 0.0, axis=1)
     df["taxable_profit"] = df.apply(lambda row: row["income"] - row["mileage_ded"] if row["entry_type"] == "Business" else 0.0, axis=1)
-    
-    # Calculate Hourly Wage (Income / Hours) safely to avoid dividing by zero
     df["hourly_wage"] = df.apply(lambda row: row["income"] / row["hours_worked"] if row["entry_type"] == "Business" and row["hours_worked"] > 0 else 0.0, axis=1)
-    
     return df
 
 def load_writeoffs() -> pd.DataFrame:
@@ -93,7 +88,7 @@ with tab_entry:
             if entry_type == "Business":
                 platform = st.selectbox("Platform", PLATFORMS)
                 income = st.number_input("Income ($)", min_value=0.0, step=0.01)
-                hours_worked = st.number_input("Hours Worked (Active)", min_value=0.0, step=0.1, help="Enter actual hours worked, not just time away from home.")
+                hours_worked = st.number_input("Hours Worked (Active)", min_value=0.0, step=0.1)
         with col2:
             odo_start = st.number_input("Odometer start", min_value=0.0, step=0.1, value=last_odo)
             odo_end = st.number_input("Odometer end", min_value=0.0, step=0.1, value=last_odo)
@@ -219,22 +214,21 @@ with tab_view:
 
                 st.caption(f"📈 **Running total through Week {idx}:** Gross ${run_income:,.2f} | Hours {run_hours:,.1f} | Schedule C ${run_taxable:,.2f}")
 
-                # BUILD TABLE WITH TOTALS ROW
+                # BUILD TABLE WITH TOTALS ROW FOR WEEKLY VIEW
                 wk_table = wk_df[["entry_date", "entry_type", "platform", "income", "hours_worked", "miles", "rate", "mileage_ded", "taxable_profit", "notes"]].rename(columns={
                     "entry_date": "Date", "entry_type": "Type", "platform": "Platform", "income": "Income", 
                     "hours_worked": "Hours", "miles": "Miles", "rate": "Rate", 
                     "mileage_ded": "Mileage Shield", "taxable_profit": "Schedule C Profit", "notes": "Notes"
                 })
                 
-                # Add Total Row
-                total_row = pd.DataFrame([{
+                total_row_wk = pd.DataFrame([{
                     "Date": "**TOTAL**", "Type": "", "Platform": "", 
                     "Income": f"**${wk_table['Income'].sum():,.2f}**", "Hours": f"**{wk_table['Hours'].sum():,.1f}**", 
                     "Miles": f"**{wk_table['Miles'].sum():,.1f}**", "Rate": "", 
                     "Mileage Shield": f"**${wk_table['Mileage Shield'].sum():,.2f}**", 
                     "Schedule C Profit": f"**${wk_table['Schedule C Profit'].sum():,.2f}**", "Notes": ""
                 }])
-                wk_table_display = pd.concat([wk_table, total_row], ignore_index=True)
+                wk_table_display = pd.concat([wk_table, total_row_wk], ignore_index=True)
                 
                 st.dataframe(wk_table_display, use_container_width=True, hide_index=True)
 
@@ -246,8 +240,18 @@ with tab_view:
             "hours_worked": "Hours", "miles": "Miles", "rate": "Rate", 
             "mileage_ded": "Mileage Shield", "taxable_profit": "Schedule C Profit", "notes": "Notes"
         }).sort_values(["Date", "ID"], ascending=[False, False])
+
+        # BUILD TABLE WITH TOTALS ROW FOR MONTHLY VIEW
+        total_row_main = pd.DataFrame([{
+            "ID": "", "Date": "**TOTAL**", "Type": "", "Platform": "", 
+            "Income": f"**${display_df['Income'].sum():,.2f}**", "Hours": f"**{display_df['Hours'].sum():,.1f}**", 
+            "Miles": f"**{display_df['Miles'].sum():,.1f}**", "Rate": "", 
+            "Mileage Shield": f"**${display_df['Mileage Shield'].sum():,.2f}**", 
+            "Schedule C Profit": f"**${display_df['Schedule C Profit'].sum():,.2f}**", "Notes": ""
+        }])
         
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        display_df_with_total = pd.concat([display_df, total_row_main], ignore_index=True)
+        st.dataframe(display_df_with_total, use_container_width=True, hide_index=True)
 
         with st.expander("✏️ Edit or delete an entry from this month"):
             entry_ids = display_df["ID"].tolist()
