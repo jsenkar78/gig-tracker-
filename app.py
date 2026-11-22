@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from calendar import monthrange
 from supabase import create_client, ClientOptions
 import io
@@ -12,7 +12,6 @@ sb = create_client(
     options=ClientOptions(schema="public", auto_refresh_token=False, persist_session=False)
 )
 
-MILEAGE_RATE = 0.72
 PLATFORMS = ["DoorDash", "Uber", "Other"]
 
 st.set_page_config(page_title="Gig Tracker", page_icon="🚗", layout="wide")
@@ -20,23 +19,49 @@ st.title("🚗 Gig Income & Mileage Tracker")
 
 
 # ---------------- Helpers ----------------
-def week_of_day(d: date) -> int:
-    return ((d.day - 1) // 7) + 1
+def get_mileage_rate(d: date) -> float:
+    """Return IRS standard business mileage rate based on entry date."""
+    if d >= date(2026, 7, 1):
+        return 0.76   # Jul 1 – Dec 31, 2026 (76 cents/mile)
+    elif d >= date(2026, 1, 1):
+        return 0.725  # Jan 1 – Jun 30, 2026 (72.5 cents/mile)
+    elif d >= date(2025, 1, 1):
+        return 0.70   # 2025 (70 cents/mile)
+    return 0.67       # 2024 (67 cents/mile)
 
 
-def load_entries():
-    res = sb.table("entries").select("*").order("entry_date").execute()
+def monday_of_week(d: date) -> date:
+    return d - timedelta(days=d.weekday())
+
+
+def load_entries() -> pd.DataFrame:
+    res = sb.table("entries").select("*").order("entry_date").order("id").execute()
     df = pd.DataFrame(res.data)
     if df.empty:
         return df
+    
     df["entry_date"] = pd.to_datetime(df["entry_date"]).dt.date
-    df["week"] = df["entry_date"].apply(week_of_day)
-    df["mileage_ded"] = df["miles"] * MILEAGE_RATE
-    df["net"] = df["income"] - df["mileage_ded"]
+    
+    # Fallback for miles calculation if missing
+    if "miles" not in df.columns or df["miles"].isna().any():
+        df["miles"] = df["odo_end"].astype(float) - df["odo_start"].astype(float)
+        
+    # Fallback for entry_type if you have old data from before this update
+    if "entry_type" not in df.columns:
+        df["entry_type"] = "Business"
+    df["entry_type"] = df["entry_type"].fillna("Business")
+    
+    df["week_start"] = df["entry_date"].apply(monday_of_week)
+    df["rate"] = df["entry_date"].apply(get_mileage_rate)
+    
+    # IMPORTANT: Only apply the tax deduction if it's a Business entry!
+    df["mileage_ded"] = df.apply(lambda row: row["miles"] * row["rate"] if row["entry_type"] == "Business" else 0.0, axis=1)
+    df["taxable_profit"] = df.apply(lambda row: row["income"] - row["mileage_ded"] if row["entry_type"] == "Business" else 0.0, axis=1)
+    
     return df
 
 
-def load_writeoffs():
+def load_writeoffs() -> pd.DataFrame:
     res = sb.table("writeoffs").select("*").order("id").execute()
     return pd.DataFrame(res.data)
 
@@ -51,12 +76,22 @@ def recurring_total(writeoffs: pd.DataFrame, weeks: float, months: float) -> flo
     return total
 
 
-def per_platform(df: pd.DataFrame):
+def per_platform(df: pd.DataFrame) -> dict:
+    # Only look at Business entries for platform stats
+    df_biz = df[df["entry_type"] == "Business"]
     out = {}
     for p in PLATFORMS:
-        sub = df[df["platform"] == p]
-        out[p] = {"income": sub["income"].sum(), "miles": sub["miles"].sum()}
+        sub = df_biz[df_biz["platform"] == p]
+        out[p] = {
+            "income": sub["income"].sum() if not sub.empty else 0.0,
+            "miles": sub["miles"].sum() if not sub.empty else 0.0,
+        }
     return out
+
+
+entries = load_entries()
+writeoffs = load_writeoffs()
+last_odo = float(entries.iloc[-1]["odo_end"]) if not entries.empty else 0.0
 
 
 # ---------------- Tabs ----------------
@@ -68,49 +103,55 @@ tab_entry, tab_view, tab_writeoffs = st.tabs(
 # ================= TAB 1: ADD ENTRY =================
 with tab_entry:
     st.subheader("Add a daily entry")
-    st.caption("Enter odometer start and end — miles are calculated for you. "
-               "Doing both Uber and DoorDash the same day? Make one entry per platform.")
+    st.caption(
+        "Select 'Business' for gig work (calculates tax deduction) or 'Personal' for errands (ignores tax deduction). "
+        "Odometer start pre-fills from your last logged drive."
+    )
 
     with st.form("add_entry", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
             entry_date = st.date_input("Date", value=date.today(), max_value=date.today())
-            platform = st.selectbox("Platform", PLATFORMS)
-            income = st.number_input("Income ($)", min_value=0.0, step=0.01)
+            entry_type = st.selectbox("Entry Type", ["Business", "Personal"])
+            
+            # These fields only show if you select "Business"
+            if entry_type == "Business":
+                platform = st.selectbox("Platform", PLATFORMS)
+                income = st.number_input("Income ($)", min_value=0.0, step=0.01)
         with col2:
-            odo_start = st.number_input("Odometer start", min_value=0.0, step=0.1, value=0.0)
-            odo_end = st.number_input("Odometer end", min_value=0.0, step=0.1, value=0.0)
+            odo_start = st.number_input("Odometer start", min_value=0.0, step=0.1, value=last_odo)
+            odo_end = st.number_input("Odometer end", min_value=0.0, step=0.1, value=last_odo)
         notes = st.text_input("Notes (optional)")
+        
         submitted = st.form_submit_button("💾 Save")
 
         if submitted:
-            if entry_date > date.today():
-                st.error(
-                    f"❌ Date {entry_date} is in the future. "
-                    f"Today is {date.today()}. Pick today or an earlier date."
-                )
-            elif odo_end < odo_start:
-                st.error(f"❌ End odometer ({odo_end:,.1f}) is less than start ({odo_start:,.1f}). "
-                         f"Check your numbers.")
-            elif odo_end == odo_start:
-                st.error("❌ Odometer start and end are identical — miles would be 0. "
-                         "Check your numbers.")
+            if odo_end <= odo_start:
+                st.error(f"❌ End odometer ({odo_end:,.1f}) must be greater than start ({odo_start:,.1f}).")
             else:
                 try:
+                    # If Personal, force income to 0 and platform to 'N/A'
+                    final_income = float(income) if entry_type == "Business" else 0.0
+                    final_platform = platform if entry_type == "Business" else "N/A"
+                    
                     sb.table("entries").insert({
                         "entry_date": entry_date.isoformat(),
-                        "platform": platform,
-                        "income": float(income),
+                        "entry_type": entry_type,
+                        "platform": final_platform,
+                        "income": final_income,
                         "odo_start": float(odo_start),
                         "odo_end": float(odo_end),
                         "notes": notes,
                     }).execute()
+                    
                     miles = odo_end - odo_start
-                    st.success(
-                        f"✅ Saved {entry_date} | {platform} | ${income:.2f} income | "
-                        f"{miles:.1f} mi ({odo_start:,.1f} → {odo_end:,.1f}) | "
-                        f"deduction ${miles * MILEAGE_RATE:.2f}"
-                    )
+                    rate = get_mileage_rate(entry_date) if entry_type == "Business" else 0.0
+                    
+                    msg = f"✅ Saved {entry_type} drive on {entry_date} | {miles:.1f} miles."
+                    if entry_type == "Business":
+                        msg += f" | Income: ${final_income:.2f} | Tax Shield: ${miles * rate:.2f}"
+                        
+                    st.success(msg)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Save failed: {e}")
@@ -118,9 +159,6 @@ with tab_entry:
 
 # ================= TAB 2: VIEW / BREAKDOWN =================
 with tab_view:
-    entries = load_entries()
-    writeoffs = load_writeoffs()
-
     if entries.empty:
         st.info("No entries yet. Add one in the ➕ tab.")
     else:
@@ -133,24 +171,34 @@ with tab_view:
         picked_year, picked_month = months_available[month_labels.index(picked_label)]
 
         days_in_month = monthrange(picked_year, picked_month)[1]
+        month_start_date = date(picked_year, picked_month, 1)
+        month_end_date = date(picked_year, picked_month, days_in_month)
+
         month_df = entries[
             (entries["entry_date"].apply(lambda d: d.year) == picked_year)
             & (entries["entry_date"].apply(lambda d: d.month) == picked_month)
         ].copy()
 
-        month_income = month_df["income"].sum()
-        month_miles = month_df["miles"].sum()
-        month_mileage = month_miles * MILEAGE_RATE
-        month_rec = recurring_total(writeoffs, weeks=days_in_month / 7, months=1)
-        month_agi = month_income - month_mileage - month_rec
+        # Split for calculations
+        month_df_biz = month_df[month_df["entry_type"] == "Business"]
+        month_df_pers = month_df[month_df["entry_type"] == "Personal"]
 
-        st.subheader(f"📅 {picked_label} — Monthly Total")
-        m1, m2, m3, m4, m5 = st.columns(5)
+        month_income = month_df_biz["income"].sum()
+        month_biz_miles = month_df_biz["miles"].sum()
+        month_pers_miles = month_df_pers["miles"].sum()
+        month_mileage = month_df_biz["mileage_ded"].sum()
+        month_rec = recurring_total(writeoffs, weeks=days_in_month / 7, months=1.0)
+        month_cash_net = month_income - month_rec
+        month_taxable = month_income - month_mileage - month_rec
+
+        st.subheader(f"📅 {picked_label} — Monthly Summary")
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
         m1.metric("Gross Income", f"${month_income:,.2f}")
-        m2.metric("Miles", f"{month_miles:,.1f}")
-        m3.metric("Mileage Deduction", f"${month_mileage:,.2f}")
-        m4.metric("Other Write-offs", f"${month_rec:,.2f}")
-        m5.metric("Adjusted Gross Income", f"${month_agi:,.2f}")
+        m2.metric("Real Write-offs", f"${month_rec:,.2f}")
+        m3.metric("Cash After Bills", f"${month_cash_net:,.2f}")
+        m4.metric("Biz Miles", f"{month_biz_miles:,.1f}", f"({month_pers_miles:,.1f} Pers)")
+        m5.metric("Mileage Shield", f"${month_mileage:,.2f}")
+        m6.metric("Schedule C Profit", f"${month_taxable:,.2f}")
 
         st.subheader("🚙 Income by platform (this month)")
         pp = per_platform(month_df)
@@ -160,54 +208,67 @@ with tab_view:
 
         st.divider()
 
-        st.subheader("📆 Week-by-week breakdown (click a week to expand)")
-        weeks_present = sorted(month_df["week"].unique())
-        run_income = run_net = 0.0
+        st.subheader("📆 Week-by-week breakdown (Monday–Sunday)")
+        weeks_present = sorted(month_df["week_start"].unique())
+        run_income = run_cash = run_taxable = 0.0
 
-        for wk in weeks_present:
-            wk_df = month_df[month_df["week"] == wk]
-            wk_income = wk_df["income"].sum()
-            wk_miles = wk_df["miles"].sum()
-            wk_mileage = wk_miles * MILEAGE_RATE
-            wk_rec = recurring_total(writeoffs, weeks=1, months=1/4.333)
-            wk_net = wk_income - wk_mileage - wk_rec
+        for idx, wk_start in enumerate(weeks_present, start=1):
+            wk_end = wk_start + timedelta(days=6)
+            in_month_start = max(wk_start, month_start_date)
+            in_month_end = min(wk_end, month_end_date)
+            days_in_wk_bucket = (in_month_end - in_month_start).days + 1
+
+            wk_df = month_df[month_df["week_start"] == wk_start]
+            wk_df_biz = wk_df[wk_df["entry_type"] == "Business"]
+            wk_df_pers = wk_df[wk_df["entry_type"] == "Personal"]
+            
+            wk_income = wk_df_biz["income"].sum()
+            wk_biz_miles = wk_df_biz["miles"].sum()
+            wk_pers_miles = wk_df_pers["miles"].sum()
+            wk_mileage = wk_df_biz["mileage_ded"].sum()
+            
+            wk_rec = recurring_total(
+                writeoffs,
+                weeks=days_in_wk_bucket / 7,
+                months=days_in_wk_bucket / days_in_month,
+            )
+            wk_cash_net = wk_income - wk_rec
+            wk_taxable = wk_income - wk_mileage - wk_rec
 
             run_income += wk_income
-            run_net += wk_net
+            run_cash += wk_cash_net
+            run_taxable += wk_taxable
 
-            start_day = (wk - 1) * 7 + 1
-            end_day = min(wk * 7, days_in_month)
-
+            wk_label = f"{wk_start.strftime('%b %d')} – {wk_end.strftime('%b %d')}"
             with st.expander(
-                f"**Week {wk}** (days {start_day}–{end_day}) "
-                f"— Income ${wk_income:.2f} | Net ${wk_net:.2f}"
+                f"**Week {idx}** ({wk_label}) "
+                f"— Gross ${wk_income:.2f} | Cash Net ${wk_cash_net:.2f} | Schedule C ${wk_taxable:.2f}"
             ):
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Income", f"${wk_income:,.2f}")
-                c2.metric("Miles", f"{wk_miles:,.1f}")
-                c3.metric("Mileage Deduction", f"${wk_mileage:,.2f}")
-                c4.metric("Net", f"${wk_net:,.2f}")
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Gross Income", f"${wk_income:,.2f}")
+                c2.metric("Real Write-offs", f"${wk_rec:,.2f}")
+                c3.metric("Cash After Bills", f"${wk_cash_net:,.2f}")
+                c4.metric("Biz Miles", f"{wk_biz_miles:,.1f}")
+                c5.metric("Mileage Shield", f"${wk_mileage:,.2f}")
+                
+                if wk_pers_miles > 0:
+                    st.caption(f"🚗 *(Also logged {wk_pers_miles:,.1f} Personal miles this week — excluded from tax math)*")
 
                 st.caption(
-                    f"📈 **Running total through Week {wk}:** "
-                    f"Income ${run_income:,.2f} | Net ${run_net:,.2f}"
+                    f"📈 **Running total through Week {idx}:** "
+                    f"Gross ${run_income:,.2f} | Cash Net ${run_cash:,.2f} | Schedule C ${run_taxable:,.2f}"
                 )
 
-                wp = per_platform(wk_df)
-                st.write("**By platform this week:**")
-                pcols = st.columns(3)
-                for col, p in zip(pcols, PLATFORMS):
-                    col.metric(p, f"${wp[p]['income']:,.2f}", f"{wp[p]['miles']:,.1f} mi")
-
                 st.dataframe(
-                    wk_df[["entry_date", "platform", "income",
+                    wk_df[["entry_date", "entry_type", "platform", "income",
                            "odo_start", "odo_end", "miles",
-                           "mileage_ded", "net", "notes"]]
+                           "rate", "mileage_ded", "taxable_profit", "notes"]]
                     .rename(columns={
-                        "entry_date": "Date", "platform": "Platform",
+                        "entry_date": "Date", "entry_type": "Type", "platform": "Platform",
                         "income": "Income", "odo_start": "Odo Start",
                         "odo_end": "Odo End", "miles": "Miles",
-                        "mileage_ded": "Mileage Ded", "net": "Net", "notes": "Notes",
+                        "rate": "Rate", "mileage_ded": "Mileage Shield",
+                        "taxable_profit": "Schedule C Profit", "notes": "Notes",
                     }),
                     use_container_width=True,
                     hide_index=True,
@@ -216,19 +277,78 @@ with tab_view:
         st.divider()
 
         st.subheader("🗂️ All entries this month")
-        st.dataframe(
-            month_df[["entry_date", "week", "platform", "income",
-                      "odo_start", "odo_end", "miles", "mileage_ded", "net", "notes"]]
+        display_df = (
+            month_df[["id", "entry_date", "entry_type", "platform", "income",
+                      "odo_start", "odo_end", "miles", "rate",
+                      "mileage_ded", "taxable_profit", "notes"]]
             .rename(columns={
-                "entry_date": "Date", "week": "Week", "platform": "Platform",
+                "id": "ID", "entry_date": "Date", "entry_type": "Type", "platform": "Platform",
                 "income": "Income", "odo_start": "Odo Start", "odo_end": "Odo End",
-                "miles": "Miles", "mileage_ded": "Mileage Ded", "net": "Net",
-                "notes": "Notes",
+                "miles": "Miles", "rate": "Rate", "mileage_ded": "Mileage Shield",
+                "taxable_profit": "Schedule C Profit", "notes": "Notes",
             })
-            .sort_values("Date", ascending=False),
-            use_container_width=True,
-            hide_index=True,
+            .sort_values(["Date", "ID"], ascending=[False, False])
         )
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        with st.expander("✏️ Edit or delete an entry from this month"):
+            entry_ids = display_df["ID"].tolist()
+            selected_entry_id = st.selectbox(
+                "Select entry to edit or delete",
+                options=entry_ids,
+                format_func=lambda i: (
+                    f"#{i} — {month_df.loc[month_df['id']==i, 'entry_date'].iloc[0]} | "
+                    f"{month_df.loc[month_df['id']==i, 'entry_type'].iloc[0]} | "
+                    f"${month_df.loc[month_df['id']==i, 'income'].iloc[0]:.2f}"
+                ),
+            )
+            erow = month_df.loc[month_df["id"] == selected_entry_id].iloc[0]
+
+            with st.form("edit_entry_form"):
+                ec1, ec2, ec3 = st.columns(3)
+                ed_date = ec1.date_input("Date", value=erow["entry_date"], max_value=date.today())
+                ed_type = ec2.selectbox("Type", ["Business", "Personal"], index=0 if erow["entry_type"]=="Business" else 1)
+                
+                if ed_type == "Business":
+                    ed_plat = ec3.selectbox(
+                        "Platform", PLATFORMS,
+                        index=PLATFORMS.index(erow["platform"]) if erow["platform"] in PLATFORMS else 0
+                    )
+                else:
+                    ed_plat = "N/A"
+                    ec3.write("*(Personal Drive)*")
+                
+                ec4, ec5, ec6 = st.columns(3)
+                ed_inc = ec4.number_input("Income ($)", value=float(erow["income"]), min_value=0.0, step=0.01, disabled=(ed_type=="Personal"))
+                ed_start = ec5.number_input("Odometer start", value=float(erow["odo_start"]), min_value=0.0, step=0.1)
+                ed_end = ec6.number_input("Odometer end", value=float(erow["odo_end"]), min_value=0.0, step=0.1)
+                ed_notes = st.text_input("Notes", value=erow["notes"] or "")
+
+                b1, b2 = st.columns(2)
+                save_entry_btn = b1.form_submit_button("💾 Save changes")
+                del_entry_btn = b2.form_submit_button("🗑️ Delete this entry")
+
+                if save_entry_btn:
+                    if ed_end <= ed_start:
+                        st.error("❌ End odometer must be greater than start odometer.")
+                    else:
+                        final_inc = float(ed_inc) if ed_type == "Business" else 0.0
+                        sb.table("entries").update({
+                            "entry_date": ed_date.isoformat(),
+                            "entry_type": ed_type,
+                            "platform": ed_plat,
+                            "income": final_inc,
+                            "odo_start": float(ed_start),
+                            "odo_end": float(ed_end),
+                            "notes": ed_notes,
+                        }).eq("id", int(selected_entry_id)).execute()
+                        st.success(f"✅ Updated entry #{selected_entry_id}")
+                        st.rerun()
+
+                if del_entry_btn:
+                    sb.table("entries").delete().eq("id", int(selected_entry_id)).execute()
+                    st.success(f"🗑️ Deleted entry #{selected_entry_id}")
+                    st.rerun()
 
         st.divider()
         st.subheader("🖨️ Export / Print")
@@ -236,13 +356,16 @@ with tab_view:
 
         with ec1:
             csv_buf = io.StringIO()
-            month_df[["entry_date", "week", "platform", "income",
-                      "odo_start", "odo_end", "miles", "mileage_ded", "net", "notes"]] \
+            month_df[["entry_date", "entry_type", "week_start", "platform", "income",
+                      "odo_start", "odo_end", "miles", "rate",
+                      "mileage_ded", "taxable_profit", "notes"]] \
                 .rename(columns={
-                    "entry_date": "Date", "week": "Week", "platform": "Platform",
-                    "income": "Income", "odo_start": "Odo Start", "odo_end": "Odo End",
-                    "miles": "Miles", "mileage_ded": "Mileage Ded", "net": "Net",
-                    "notes": "Notes",
+                    "entry_date": "Date", "entry_type": "Type", "week_start": "Week Starting",
+                    "platform": "Platform", "income": "Income",
+                    "odo_start": "Odo Start", "odo_end": "Odo End",
+                    "miles": "Miles", "rate": "IRS Rate",
+                    "mileage_ded": "Mileage Shield",
+                    "taxable_profit": "Schedule C Profit", "notes": "Notes",
                 }) \
                 .sort_values("Date") \
                 .to_csv(csv_buf, index=False)
@@ -259,41 +382,38 @@ with tab_view:
 
         if st.session_state.get("show_print"):
             st.markdown("---")
-            st.markdown(f"### Monthly Income Report — {picked_label}")
+            st.markdown(f"### Monthly Income & Mileage Report — {picked_label}")
             st.markdown(
-                f"**Total income:** ${month_income:,.2f}  \n"
-                f"**Total miles:** {month_miles:,.1f}  \n"
-                f"**Mileage deduction:** ${month_mileage:,.2f}  \n"
-                f"**Other write-offs:** ${month_rec:,.2f}  \n"
-                f"**Adjusted gross income:** ${month_agi:,.2f}"
+                f"**Gross income:** ${month_income:,.2f}  \n"
+                f"**Real recurring write-offs:** ${month_rec:,.2f}  \n"
+                f"**Cash after bills:** ${month_cash_net:,.2f}  \n"
+                f"**Business miles:** {month_biz_miles:,.1f}  \n"
+                f"**Personal miles:** {month_pers_miles:,.1f}  \n"
+                f"**Mileage shield:** ${month_mileage:,.2f}  \n"
+                f"**Schedule C profit:** ${month_taxable:,.2f}"
             )
-            st.markdown("#### Week-by-week")
-            wk_summary = month_df.groupby("week").agg(
+            st.markdown("#### Week-by-week (Mon–Sun)")
+            wk_summary = month_df_biz.groupby("week_start").agg(
                 income=("income", "sum"),
                 miles=("miles", "sum"),
+                mileage_ded=("mileage_ded", "sum"),
+                taxable_profit=("taxable_profit", "sum"),
             ).reset_index()
-            wk_summary["mileage_ded"] = wk_summary["miles"] * MILEAGE_RATE
-            wk_summary["net"] = wk_summary["income"] - wk_summary["mileage_ded"]
             st.table(wk_summary.rename(columns={
-                "week": "Week", "income": "Income", "miles": "Miles",
-                "mileage_ded": "Mileage Ded", "net": "Net",
+                "week_start": "Week Starting", "income": "Gross Income",
+                "miles": "Biz Miles", "mileage_ded": "Mileage Shield",
+                "taxable_profit": "Schedule C Profit",
             }).round(2))
-            st.markdown("#### Platform totals")
-            plat_summary = pd.DataFrame([
-                {"Platform": p, "Income": pp[p]["income"], "Miles": pp[p]["miles"]}
-                for p in PLATFORMS
-            ])
-            st.table(plat_summary.round(2))
             st.caption("Press Ctrl+P (or Cmd+P on Mac) to print this report.")
 
 
 # ================= TAB 3: MANAGE WRITE-OFFS =================
 with tab_writeoffs:
     st.subheader("Your recurring write-offs")
-    st.caption("Edit amounts when your phone bill changes. Turn off (deactivate) when you cancel something. "
-               "Inactive write-offs are excluded from all future calculations but their history stays.")
-
-    writeoffs = load_writeoffs()
+    st.caption(
+        "Edit amounts when bills change. Turn off (deactivate) when you cancel something. "
+        "Inactive write-offs are excluded from future calculations while keeping history."
+    )
 
     if not writeoffs.empty:
         st.dataframe(writeoffs[["id", "name", "amount", "frequency", "active"]],
@@ -348,7 +468,7 @@ with tab_writeoffs:
     st.subheader("Add new write-off")
     with st.form("add_writeoff", clear_on_submit=True):
         wcol1, wcol2, wcol3 = st.columns(3)
-        wname = wcol1.text_input("Name", placeholder="e.g. Gridwise")
+        wname = wcol1.text_input("Name", placeholder="e.g. Business Phone Line")
         wamount = wcol2.number_input("Amount ($)", min_value=0.0, step=0.01)
         wfreq = wcol3.selectbox("Frequency", ["monthly", "weekly"])
         wsub = st.form_submit_button("💾 Save write-off")
@@ -359,16 +479,3 @@ with tab_writeoffs:
             }).execute()
             st.success(f"✅ Added {wname} — ${wamount:.2f}/{wfreq}")
             st.rerun()
-
-
-# ================= SIDEBAR: DELETE ENTRY =================
-with st.sidebar:
-    st.header("🗑️ Delete an entry")
-    st.caption("Find the ID in the month table or Supabase dashboard.")
-    del_entry_id = st.number_input("Entry ID", min_value=1, step=1, key="del_e")
-    if st.button("Delete entry"):
-        try:
-            sb.table("entries").delete().eq("id", int(del_entry_id)).execute()
-            st.success(f"Deleted entry #{del_entry_id}")
-        except Exception as e:
-            st.error(str(e))
