@@ -50,7 +50,6 @@ def load_entries() -> pd.DataFrame:
     
     df["mileage_ded"] = df.apply(lambda row: row["miles"] * row["rate"] if row["entry_type"] == "Business" else 0.0, axis=1)
     df["taxable_profit"] = df.apply(lambda row: row["income"] - row["mileage_ded"] if row["entry_type"] == "Business" else 0.0, axis=1)
-    df["hourly_wage"] = df.apply(lambda row: row["income"] / row["hours_worked"] if row["entry_type"] == "Business" and row["hours_worked"] > 0 else 0.0, axis=1)
     return df
 
 def load_writeoffs() -> pd.DataFrame:
@@ -148,32 +147,49 @@ with tab_view:
         month_pers_miles = month_df_pers["miles"].sum()
         month_mileage = month_df_biz["mileage_ded"].sum()
         month_rec = recurring_total(writeoffs, weeks=days_in_month / 7, months=1.0)
-        month_net_cash = month_income - month_rec
-        month_taxable = month_income - month_mileage - month_rec
-        month_tax_savings = month_taxable * TAX_RATE if month_taxable > 0 else 0
+        month_total_writeoffs = month_mileage + month_rec
+        month_net_profit = month_income - month_total_writeoffs
+        month_tax_savings = month_net_profit * TAX_RATE if month_net_profit > 0 else 0
         month_hours = month_df_biz["hours_worked"].sum()
         month_hourly = month_income / month_hours if month_hours > 0 else 0
 
         st.subheader(f"📅 {picked_label} — Monthly Summary")
-        m1, m2, m3, m4, m5, m6 = st.columns(6)
-        m1.metric("Gross Income", f"${month_income:,.2f}")
-        m2.metric("Net Biz Cash", f"${month_net_cash:,.2f}")
-        m3.metric("Hours Worked", f"{month_hours:,.1f} hrs", f"${month_hourly:,.2f}/hr avg")
-        m4.metric("Miles", f"{month_biz_miles:,.1f}", f"{month_pers_miles:,.1f} Personal")
-        m5.metric("Schedule C Profit", f"${month_taxable:,.2f}")
-        m6.metric("Set Aside for Taxes", f"${month_tax_savings:,.2f}")
+        
+        # --- COMPACT SUMMARY TABLE WITH CLEAR MATH FLOW ---
+        summary_data = {
+            "Gross Income": [f"${month_income:,.2f}"],
+            "Mileage Shield": [f"-${month_mileage:,.2f}"],
+            "Recurring Bills": [f"-${month_rec:,.2f}"],
+            "Total Write-offs": [f"${month_total_writeoffs:,.2f}"],
+            "Net Profit (Sch C)": [f"${month_net_profit:,.2f}"],
+            "Set Aside Tax": [f"${month_tax_savings:,.2f}"]
+        }
+        st.dataframe(pd.DataFrame(summary_data), hide_index=True, use_container_width=True)
 
         st.subheader("🚙 Income by platform (this month)")
         pp = per_platform(month_df)
-        pc1, pc2, pc3 = st.columns(3)
-        for col, p in zip([pc1, pc2, pc3], PLATFORMS):
-            col.metric(f"{p}", f"${pp[p]['income']:,.2f}", f"{pp[p]['miles']:,.1f} mi")
+        
+        platform_data = {
+            "DoorDash": [f"${pp['DoorDash']['income']:,.2f}", f"{pp['DoorDash']['miles']:,.1f} mi"],
+            "Uber": [f"${pp['Uber']['income']:,.2f}", f"{pp['Uber']['miles']:,.1f} mi"],
+            "Other": [f"${pp['Other']['income']:,.2f}", f"{pp['Other']['miles']:,.1f} mi"]
+        }
+        st.dataframe(pd.DataFrame(platform_data, index=["Income", "Miles"]), use_container_width=True)
 
         st.divider()
 
         st.subheader("📆 Week-by-week breakdown (Monday–Sunday)")
-        weeks_present = sorted(month_df["week_start"].unique())
-        run_income = run_cash = run_taxable = run_hours = 0.0
+        
+        curr_date = month_start_date
+        while curr_date.weekday() != 0: 
+            curr_date += timedelta(days=1)
+            
+        weeks_present = []
+        while curr_date.month == picked_month:
+            weeks_present.append(curr_date)
+            curr_date += timedelta(days=7)
+
+        run_income = run_writeoffs = run_profit = run_hours = 0.0
 
         for idx, wk_start in enumerate(weeks_present, start=1):
             wk_end = wk_start + timedelta(days=6)
@@ -193,98 +209,91 @@ with tab_view:
             wk_hourly = wk_income / wk_hours if wk_hours > 0 else 0
             
             wk_rec = recurring_total(writeoffs, weeks=days_in_wk_bucket / 7, months=days_in_wk_bucket / days_in_month)
-            wk_net_cash = wk_income - wk_rec
-            wk_taxable = wk_income - wk_mileage - wk_rec
-            wk_tax_savings = wk_taxable * TAX_RATE if wk_taxable > 0 else 0
+            wk_total_wo = wk_mileage + wk_rec
+            wk_net_profit = wk_income - wk_total_wo
+            wk_tax_savings = wk_net_profit * TAX_RATE if wk_net_profit > 0 else 0
 
             run_income += wk_income
-            run_cash += wk_net_cash
-            run_taxable += wk_taxable
+            run_writeoffs += wk_total_wo
+            run_profit += wk_net_profit
             run_hours += wk_hours
 
             wk_label = f"{wk_start.strftime('%b %d')} – {wk_end.strftime('%b %d')}"
-            with st.expander(
-                f"**Week {idx}** ({wk_label}) — Gross ${wk_income:.2f} | ${wk_hourly:.2f}/hr | Schedule C ${wk_taxable:.2f}"
-            ):
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Gross Income", f"${wk_income:,.2f}")
-                c2.metric("Hours Worked", f"{wk_hours:,.1f} hrs", f"${wk_hourly:.2f}/hr avg")
-                c3.metric("Mileage Shield", f"${wk_mileage:,.2f}")
-                c4.metric("Schedule C Profit", f"${wk_taxable:,.2f}")
+            expander_title = f"**Week {idx}** ({wk_label}) — Gross ${wk_income:.2f} | Net ${wk_net_profit:.2f}"
+            
+            with st.expander(expander_title):
+                if wk_df.empty:
+                    st.info("No entries logged for this week.")
+                else:
+                    st.caption(f"📈 **Running total through Week {idx}:** Gross ${run_income:,.2f} | Write-offs ${run_writeoffs:,.2f} | Net ${run_profit:,.2f}")
 
-                st.caption(f"📈 **Running total through Week {idx}:** Gross ${run_income:,.2f} | Hours {run_hours:,.1f} | Schedule C ${run_taxable:,.2f}")
-
-                # BUILD TABLE WITH TOTALS ROW FOR WEEKLY VIEW
-                wk_table = wk_df[["entry_date", "entry_type", "platform", "income", "hours_worked", "miles", "rate", "mileage_ded", "taxable_profit", "notes"]].rename(columns={
-                    "entry_date": "Date", "entry_type": "Type", "platform": "Platform", "income": "Income", 
-                    "hours_worked": "Hours", "miles": "Miles", "rate": "Rate", 
-                    "mileage_ded": "Mileage Shield", "taxable_profit": "Schedule C Profit", "notes": "Notes"
-                })
-                
-                # ADD WEEKLY WRITE-OFFS COLUMN (only for the total row)
-                wk_table["Write-offs"] = 0.0
-
-                # BUILD TOTAL ROW (Now includes Write-offs so the math works visually)
-                total_row_wk = pd.DataFrame([{
-                    "Date": "TOTAL", "Type": "", "Platform": "", 
-                    "Income": wk_table['Income'].sum(), "Hours": wk_table['Hours'].sum(), 
-                    "Miles": wk_table['Miles'].sum(), "Rate": "", 
-                    "Mileage Shield": wk_table['Mileage Shield'].sum(), 
-                    "Write-offs": wk_rec,
-                    "Schedule C Profit": wk_taxable, # Use the calculated wk_taxable to match the top!
-                    "Notes": ""
-                }])
-                
-                # Reorder columns to put Write-offs before Schedule C
-                cols = ["Date", "Type", "Platform", "Income", "Hours", "Miles", "Rate", "Mileage Shield", "Write-offs", "Schedule C Profit", "Notes"]
-                wk_table = wk_table[cols]
-                total_row_wk = total_row_wk[cols]
-                
-                wk_table_display = pd.concat([wk_table, total_row_wk], ignore_index=True)
-                
-                st.dataframe(wk_table_display.style.format({
-                    "Income": "${:,.2f}", "Miles": "{:,.1f}", "Hours": "{:,.1f}",
-                    "Mileage Shield": "${:,.2f}", "Write-offs": "${:,.2f}", "Schedule C Profit": "${:,.2f}"
-                }), use_container_width=True, hide_index=True)
+                    wk_table = wk_df[["entry_date", "platform", "income", "hours_worked", "miles", "mileage_ded", "taxable_profit", "notes"]].rename(columns={
+                        "entry_date": "Date", "platform": "Platform", "income": "Income", 
+                        "hours_worked": "Hours", "miles": "Miles", 
+                        "mileage_ded": "Mileage Shield", "taxable_profit": "Net Profit", "notes": "Notes"
+                    })
+                    
+                    st.dataframe(wk_table.style.format({
+                        "Income": "${:,.2f}", "Miles": "{:,.1f}", "Hours": "{:,.1f}",
+                        "Mileage Shield": "${:,.2f}", "Net Profit": "${:,.2f}"
+                    }), use_container_width=True, hide_index=True)
+                    
+                    # LOCKED TOTAL ROW (Clearly shows Income - Deductions = Net Profit)
+                    st.markdown(f"""
+                    <div style="background-color: #f0f2f6; padding: 10px; border-radius: 5px; font-weight: bold; font-size: 14px;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                            <span>Income:</span> <span>${wk_income:,.2f}</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #555;">
+                            <span>Mileage Shield:</span> <span>-${wk_mileage:,.2f}</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #555;">
+                            <span>Recurring Write-offs:</span> <span>-${wk_rec:,.2f}</span>
+                        </div>
+                        <hr style="margin: 5px 0; border-top: 1px solid #ccc;">
+                        <div style="display: flex; justify-content: space-between; color: #0068c9;">
+                            <span>Net Profit:</span> <span>${wk_net_profit:,.2f}</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
         st.divider()
 
         st.subheader("🗂️ All entries this month")
-        display_df = month_df[["id", "entry_date", "entry_type", "platform", "income", "hours_worked", "miles", "rate", "mileage_ded", "taxable_profit", "notes"]].rename(columns={
-            "id": "ID", "entry_date": "Date", "entry_type": "Type", "platform": "Platform", "income": "Income", 
-            "hours_worked": "Hours", "miles": "Miles", "rate": "Rate", 
-            "mileage_ded": "Mileage Shield", "taxable_profit": "Schedule C Profit", "notes": "Notes"
-        }).sort_values(["Date", "ID"], ascending=[False, False])
+        display_df = month_df[["entry_date", "platform", "income", "hours_worked", "miles", "mileage_ded", "taxable_profit", "notes"]].rename(columns={
+            "entry_date": "Date", "platform": "Platform", "income": "Income", 
+            "hours_worked": "Hours", "miles": "Miles", 
+            "mileage_ded": "Mileage Shield", "taxable_profit": "Net Profit", "notes": "Notes"
+        }).sort_values("Date", ascending=False)
 
-        display_df["Write-offs"] = 0.0
-
-        # BUILD TABLE WITH TOTALS ROW FOR MONTHLY VIEW
-        total_row_main = pd.DataFrame([{
-            "ID": "", "Date": "TOTAL", "Type": "", "Platform": "", 
-            "Income": display_df['Income'].sum(), "Hours": display_df['Hours'].sum(), 
-            "Miles": display_df['Miles'].sum(), "Rate": "", 
-            "Mileage Shield": display_df['Mileage Shield'].sum(), 
-            "Write-offs": month_rec,
-            "Schedule C Profit": month_taxable, # Use the calculated month_taxable to match the top!
-            "Notes": ""
-        }])
-        
-        cols = ["ID", "Date", "Type", "Platform", "Income", "Hours", "Miles", "Rate", "Mileage Shield", "Write-offs", "Schedule C Profit", "Notes"]
-        display_df = display_df[cols]
-        total_row_main = total_row_main[cols]
-
-        display_df_with_total = pd.concat([display_df, total_row_main], ignore_index=True)
-        
-        st.dataframe(display_df_with_total.style.format({
+        st.dataframe(display_df.style.format({
             "Income": "${:,.2f}", "Miles": "{:,.1f}", "Hours": "{:,.1f}",
-            "Mileage Shield": "${:,.2f}", "Write-offs": "${:,.2f}", "Schedule C Profit": "${:,.2f}"
+            "Mileage Shield": "${:,.2f}", "Net Profit": "${:,.2f}"
         }), use_container_width=True, hide_index=True)
 
+        st.markdown(f"""
+        <div style="background-color: #f0f2f6; padding: 10px; border-radius: 5px; font-weight: bold; font-size: 14px;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                <span>Month Income:</span> <span>${month_income:,.2f}</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #555;">
+                <span>Total Mileage Shield:</span> <span>-${month_mileage:,.2f}</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #555;">
+                <span>Total Recurring Write-offs:</span> <span>-${month_rec:,.2f}</span>
+            </div>
+            <hr style="margin: 5px 0; border-top: 1px solid #ccc;">
+            <div style="display: flex; justify-content: space-between; color: #0068c9;">
+                <span>Net Schedule C Profit:</span> <span>${month_net_profit:,.2f}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
         with st.expander("✏️ Edit or delete an entry from this month"):
-            entry_ids = display_df["ID"].tolist()
+            entry_ids = month_df["id"].tolist()
             selected_entry_id = st.selectbox(
                 "Select entry to edit or delete", options=entry_ids,
-                format_func=lambda i: f"#{i} — {month_df.loc[month_df['id']==i, 'entry_date'].iloc[0]} | {month_df.loc[month_df['id']==i, 'entry_type'].iloc[0]} | ${month_df.loc[month_df['id']==i, 'income'].iloc[0]:.2f}",
+                format_func=lambda i: f"#{i} — {month_df.loc[month_df['id']==i, 'entry_date'].iloc[0]} | {month_df.loc[month_df['id']==i, 'platform'].iloc[0]} | ${month_df.loc[month_df['id']==i, 'income'].iloc[0]:.2f}",
             )
             erow = month_df.loc[month_df["id"] == selected_entry_id].iloc[0]
 
@@ -337,7 +346,7 @@ with tab_view:
         with ec1:
             csv_buf = io.StringIO()
             month_df[["entry_date", "entry_type", "week_start", "platform", "income", "hours_worked", "miles", "rate", "mileage_ded", "taxable_profit", "notes"]] \
-                .rename(columns={"entry_date": "Date", "entry_type": "Type", "week_start": "Week Starting", "platform": "Platform", "income": "Income", "hours_worked": "Hours", "miles": "Miles", "rate": "IRS Rate", "mileage_ded": "Mileage Shield", "taxable_profit": "Schedule C Profit", "notes": "Notes"}) \
+                .rename(columns={"entry_date": "Date", "entry_type": "Type", "week_start": "Week Starting", "platform": "Platform", "income": "Income", "hours_worked": "Hours", "miles": "Miles", "rate": "IRS Rate", "mileage_ded": "Mileage Shield", "taxable_profit": "Net Profit", "notes": "Notes"}) \
                 .sort_values("Date").to_csv(csv_buf, index=False)
             st.download_button(label="⬇️ Download this month as CSV", data=csv_buf.getvalue(), file_name=f"gig_{picked_year}_{picked_month:02d}.csv", mime="text/csv")
 
@@ -350,12 +359,11 @@ with tab_view:
             st.markdown(f"### Monthly Income & Mileage Report — {picked_label}")
             st.markdown(
                 f"**Gross income:** ${month_income:,.2f}  \n"
-                f"**Net Biz Cash:** ${month_net_cash:,.2f}  \n"
-                f"**Business miles:** {month_biz_miles:,.1f}  \n"
-                f"**Personal miles:** {month_pers_miles:,.1f}  \n"
-                f"**Mileage shield:** ${month_mileage:,.2f}  \n"
-                f"**Schedule C profit:** ${month_taxable:,.2f}  \n"
-                f"**Suggested tax set-aside:** ${month_tax_savings:,.2f}  \n"
+                f"**Mileage Shield:** ${month_mileage:,.2f}  \n"
+                f"**Recurring Write-offs:** ${month_rec:,.2f}  \n"
+                f"**Total Write-offs:** ${month_total_writeoffs:,.2f}  \n"
+                f"**Net Schedule C Profit:** ${month_net_profit:,.2f}  \n"
+                f"**Suggested Tax Set-Aside:** ${month_tax_savings:,.2f}  \n"
                 f"**Total Hours Worked:** {month_hours:,.1f} (${month_hourly:,.2f}/hr avg)"
             )
             st.caption("Press Ctrl+P (or Cmd+P on Mac) to print this report.")
